@@ -6,6 +6,11 @@ IP质量检测脚本 - 基于开源项目修改的个人定制版本
 
 本项目基于 [xykt/IPQuality](https://github.com/xykt/IPQuality) 项目进行修改，主要自用。该脚本用于检测IP地址的质量，包括IP地理位置、风险评分、流媒体解锁情况等多个维度的综合检测。
 
+直接使用: 
+```
+bash <(curl -fsSL https://github.com/illuxiza/sh/raw/main/iq/ip-quality.sh)
+```
+
 ## 主要修改内容
 
 ### 新增功能
