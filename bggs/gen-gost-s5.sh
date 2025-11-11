@@ -90,9 +90,16 @@ save_config_metadata() {
     local config_dir=$6
     local timestamp=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S")
 
+    # 处理多选IP的网络描述
+    local network_display="$network"
+    if [[ "$network" == MULTI_IPS:* ]]; then
+        local count=$(echo "$network" | cut -d':' -f2)
+        network_display="多选IP ($count个)"
+    fi
+
     # 使用jq构建JSON以确保正确的转义
     jq --arg id "$config_id" \
-       --arg network "$network" \
+       --arg network "$network_display" \
        --arg port "$port" \
        --arg username "$username" \
        --arg password "$password" \
@@ -117,8 +124,15 @@ check_duplicate_config() {
 
     init_config_dir
 
+    # 处理多选IP的网络显示名称
+    local network_display="$network"
+    if [[ "$network" == MULTI_IPS:* ]]; then
+        local count=$(echo "$network" | cut -d':' -f2)
+        network_display="多选IP ($count个)"
+    fi
+
     # 检查是否有相同网段和端口的配置
-    local existing=$(jq -r --arg network "$network" --arg port "$port" \
+    local existing=$(jq -r --arg network "$network_display" --arg port "$port" \
         '.configs[] | select(.network == $network and (.port | tostring) == $port) | .id' \
         "$META_FILE" 2>/dev/null)
 
@@ -253,43 +267,120 @@ stop_proxy_by_id() {
     local config_info=$(jq -r ".configs[] | select(.id == $config_id)" "$META_FILE")
     local config_dir=$(echo "$config_info" | jq -r '.config_dir')
     local pid_file="$config_dir/gost.pid"
+    local config_file="$config_dir/gost-config.json"
 
-    if [ ! -f "$pid_file" ]; then
-        print_warning "PID文件不存在，代理可能未运行"
-        return 1
+    # 尝试多种方法找到并关闭GOST进程
+    local found_processes=false
+
+    # 方法1: 使用PID文件
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if ps -p "$pid" > /dev/null 2>&1; then
+            print_info "发现GOST进程 (PID: $pid)，正在关闭..."
+            kill "$pid" 2>/dev/null
+            sleep 2
+            found_processes=true
+        else
+            print_warning "PID文件中的进程 (PID: $pid) 未运行"
+        fi
+    else
+        print_warning "PID文件不存在"
     fi
 
-    local pid=$(cat "$pid_file")
-    if ! ps -p "$pid" > /dev/null 2>&1; then
-        print_warning "进程 (PID: $pid) 未运行"
+    # 方法2: 通过配置文件查找进程
+    if ! $found_processes || [ ! -f "$pid_file" ]; then
+        print_info "通过配置文件查找GOST进程..."
+        local pids=$(pgrep -f "gost.*$config_file" 2>/dev/null)
+        if [ -n "$pids" ]; then
+            for pid in $pids; do
+                if ps -p "$pid" > /dev/null 2>&1; then
+                    print_info "发现GOST进程 (PID: $pid)，正在关闭..."
+                    kill "$pid" 2>/dev/null
+                    found_processes=true
+                fi
+            done
+        fi
+    fi
+
+    # 方法3: 通过端口查找进程（如果知道端口）
+    if ! $found_processes; then
+        print_info "通过端口查找GOST进程..."
+        # 从配置文件中提取端口信息
+        local ports=$(grep -o '"addr":[[:space:]]*"[^"]*:[0-9]*"' "$config_file" 2>/dev/null | grep -o '[0-9]*$' | head -5)
+        if [ -n "$ports" ]; then
+            for port in $ports; do
+                local pids=$(lsof -ti :"$port" 2>/dev/null)
+                if [ -n "$pids" ]; then
+                    for pid in $pids; do
+                        if ps -p "$pid" > /dev/null 2>&1 && ps -p "$pid" -o comm= | grep -q "gost"; then
+                            print_info "发现监听端口 $port 的GOST进程 (PID: $pid)，正在关闭..."
+                            kill "$pid" 2>/dev/null
+                            found_processes=true
+                        fi
+                    done
+                fi
+            done
+        fi
+    fi
+
+    if ! $found_processes; then
+        print_warning "未找到运行中的GOST进程"
         rm -f "$pid_file"
         # 更新状态
         jq --argjson id "$config_id" '.configs |= map(if .id == $id then .status = "stopped" else . end)' "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
         return 1
     fi
 
-    print_info "正在关闭GOST进程 (PID: $pid)..."
-    kill "$pid" 2>/dev/null
+    # 等待进程优雅关闭
+    sleep 2
+
+    # 检查是否还有进程在运行，如果有则强制关闭
+    local still_running=false
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if ps -p "$pid" > /dev/null 2>&1; then
+            print_warning "进程未响应，强制关闭..."
+            kill -9 "$pid" 2>/dev/null
+            still_running=true
+        fi
+    fi
+
+    # 再次检查通过配置文件找到的进程
+    local pids=$(pgrep -f "gost.*$config_file" 2>/dev/null)
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            if ps -p "$pid" > /dev/null 2>&1; then
+                print_warning "强制关闭进程 (PID: $pid)..."
+                kill -9 "$pid" 2>/dev/null
+                still_running=true
+            fi
+        done
+    fi
+
+    # 最终验证
     sleep 1
-
-    # 如果进程还在运行，强制关闭
-    if ps -p "$pid" > /dev/null 2>&1; then
-        print_warning "进程未响应，强制关闭..."
-        kill -9 "$pid" 2>/dev/null
-        sleep 1
+    local any_running=false
+    if [ -f "$pid_file" ]; then
+        local pid=$(cat "$pid_file")
+        if ps -p "$pid" > /dev/null 2>&1; then
+            any_running=true
+        fi
     fi
 
-    # 验证进程已关闭
-    if ps -p "$pid" > /dev/null 2>&1; then
-        print_error "无法关闭进程"
+    if [ -n "$(pgrep -f "gost.*$config_file" 2>/dev/null)" ]; then
+        any_running=true
+    fi
+
+    if $any_running; then
+        print_error "无法完全关闭某些GOST进程，请手动检查"
         return 1
+    else
+        rm -f "$pid_file"
+        print_success "所有GOST进程已关闭"
+        # 更新状态
+        jq --argjson id "$config_id" '.configs |= map(if .id == $id then .status = "stopped" else . end)' "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
+        return 0
     fi
-
-    rm -f "$pid_file"
-    print_success "GOST进程已关闭"
-
-    # 更新状态
-    jq --argjson id "$config_id" '.configs |= map(if .id == $id then .status = "stopped" else . end)' "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
 }
 
 # 选择配置关闭菜单
@@ -388,17 +479,59 @@ start_proxy_by_id() {
     # 启动GOST，使用nohup并输出日志
     local log_file="$config_dir/gost.log"
     local pid_file="$config_dir/gost.pid"
-    print_info "执行命令: nohup gost -C $config_file > $log_file 2>&1 &"
-    nohup gost -C "$config_file" > "$log_file" 2>&1 &
+
+    # 确保旧的进程已经停止
+    if [ -f "$pid_file" ]; then
+        local old_pid=$(cat "$pid_file")
+        if ps -p "$old_pid" > /dev/null 2>&1; then
+            print_info "发现旧的进程正在运行 (PID: $old_pid)，正在停止..."
+            kill "$old_pid" 2>/dev/null
+            sleep 2
+            if ps -p "$old_pid" > /dev/null 2>&1; then
+                print_warning "强制停止旧进程..."
+                kill -9 "$old_pid" 2>/dev/null
+            fi
+        fi
+    fi
+
+    # 使用nohup和setsid确保进程完全独立
+    print_info "启动GOST代理服务..."
+    print_info "配置文件: $config_file"
+
+    # 使用setsid创建新的会话，确保进程完全独立
+    nohup setsid gost -C "$config_file" > "$log_file" 2>&1 &
     local gost_pid=$!
 
-    # 保存PID到文件
-    echo "$gost_pid" > "$pid_file"
+    # 等待一下确保进程启动
+    sleep 1
 
-    print_success "GOST已在后台启动，PID: $gost_pid"
-    print_info "日志文件: $log_file"
-    print_info "PID文件: $pid_file"
-    print_info "查看日志: tail -f $log_file"
+    # 验证进程是否真的启动了
+    if ps -p "$gost_pid" > /dev/null 2>&1; then
+        # 保存PID到文件
+        echo "$gost_pid" > "$pid_file"
+
+        print_success "GOST代理服务已启动，PID: $gost_pid"
+        print_info "日志文件: $log_file"
+        print_info "PID文件: $pid_file"
+        print_info "查看日志: tail -f $log_file"
+        print_info "停止服务: ./generate-socks5.sh -k $config_id"
+
+        # 检查进程是否正常监听端口
+        sleep 2
+        local listening_count=$(netstat -tlnp 2>/dev/null | grep "$gost_pid/gost" | wc -l)
+        if [ "$listening_count" -gt 0 ]; then
+            print_success "代理服务正在监听 $listening_count 个端口"
+        else
+            print_warning "未检测到代理服务监听端口，请检查日志文件"
+        fi
+    else
+        print_error "GOST启动失败，请检查配置文件和日志"
+        if [ -f "$log_file" ]; then
+            print_info "错误日志:"
+            tail -10 "$log_file"
+        fi
+        return 1
+    fi
 
     # 显示代理信息
     local results_file="$config_dir/socks5_results.txt"
@@ -532,6 +665,21 @@ validate_network() {
 get_network_range() {
     local network=$1
 
+    # 检查是否为多选IP标记
+    if [[ "$network" == MULTI_IPS:* ]]; then
+        # 解析多选IP标记: MULTI_IPS:count:ip1 ip2 ip3...
+        local count=$(echo "$network" | cut -d':' -f2)
+        local ips=$(echo "$network" | cut -d':' -f3-)
+
+        print_info "多选IP模式，将为 $count 个选择的IP生成代理" >&2
+
+        # 输出所有选择的IP地址，每行一个
+        for ip in $ips; do
+            echo "$ip"
+        done
+        return 0
+    fi
+
     # 检查是否为单个IP格式（不包含斜杠）
     if [[ ! "$network" == *"/"* ]]; then
         # 单个IP，直接返回该IP
@@ -641,6 +789,10 @@ EOF
       },
       "listener": {
         "type": "tcp"
+      },
+      "metadata": {
+        "enableStats": "true",
+        "interface": "$ip"
       }
     }
 EOF
@@ -676,6 +828,10 @@ EOF
       },
       "listener": {
         "type": "tcp"
+      },
+      "metadata": {
+        "enableStats": "true",
+        "interface": "$ip"
       }
     }
 EOF
@@ -732,7 +888,7 @@ select_network() {
         echo "" >&2
         echo "请选择网段来源:" >&2
         echo "1) 从路由表中选择网段 (推荐)" >&2
-        echo "2) 从本机IP地址中选择 (单个IP模式)" >&2
+        echo "2) 从本机IP地址中选择 (支持多选)" >&2
         echo "3) 手动输入网段或IP (CIDR网段或单个IP)" >&2
         echo "4) 退出" >&2
         echo "" >&2
@@ -792,7 +948,7 @@ select_route_network() {
     done
 }
 
-# 从本机IP地址中选择
+# 从本机IP地址中选择 (支持多选)
 select_interface_ip() {
     echo "" >&2
     print_info "可用的网络接口IP地址:" >&2
@@ -803,24 +959,70 @@ select_interface_ip() {
         return 1
     fi
 
-    # 使用select命令显示选择菜单
-    PS3="请选择网络接口 (输入数字): "
-    select selected_interface in "${interfaces[@]}" "返回上级菜单"; do
-        if [ -n "$selected_interface" ]; then
-            if [ "$selected_interface" = "返回上级菜单" ]; then
-                select_network
-                return $?
+    # 显示所有可用IP
+    echo "" >&2
+    for i in "${!interfaces[@]}"; do
+        echo "  $((i+1)). ${interfaces[$i]}" >&2
+    done
+    echo "" >&2
+
+    local selected_ips=()
+
+    while true; do
+        echo "" >&2
+        print_info "请选择IP地址 (输入数字，多个用空格分隔，0 结束选择):" >&2
+        read -p "选择: " input
+
+        if [ "$input" = "0" ]; then
+            if [ ${#selected_ips[@]} -eq 0 ]; then
+                print_warning "未选择任何IP地址" >&2
+                continue
             else
-                # 显示选择的IP信息
-                print_info "选择的IP: $selected_interface" >&2
-                print_info "将仅对IP $selected_interface 生成代理" >&2
-                echo "$selected_interface"
-                return 0
+                break
             fi
-        else
-            print_warning "无效选择，请重新输入" >&2
+        fi
+
+        # 解析输入的数字
+        local valid_selection=true
+        for num in $input; do
+            if echo "$num" | grep -qE '^[0-9]+$'; then
+                if [ "$num" -ge 1 ] && [ "$num" -le ${#interfaces[@]} ]; then
+                    local selected_ip="${interfaces[$((num-1))]}"
+                    # 检查是否已经选择过
+                    if [[ ! " ${selected_ips[@]} " =~ " ${selected_ip} " ]]; then
+                        selected_ips+=("$selected_ip")
+                        print_success "已添加: $selected_ip" >&2
+                    else
+                        print_warning "$selected_ip 已选择" >&2
+                    fi
+                else
+                    print_warning "数字 $num 超出范围" >&2
+                    valid_selection=false
+                fi
+            else
+                print_warning "'$num' 不是有效数字" >&2
+                valid_selection=false
+            fi
+        done
+
+        if [ "$valid_selection" = true ]; then
+            echo "" >&2
+            print_info "当前已选择的IP地址:" >&2
+            for ip in "${selected_ips[@]}"; do
+                echo "  - $ip" >&2
+            done
         fi
     done
+
+    echo "" >&2
+    print_info "最终选择了 ${#selected_ips[@]} 个IP地址:" >&2
+    for ip in "${selected_ips[@]}"; do
+        echo "  - $ip" >&2
+    done
+
+    # 返回特殊格式的字符串，类似全部IP的处理方式
+    echo "MULTI_IPS:${#selected_ips[@]}:${selected_ips[*]}"
+    return 0
 }
 
 # 手动输入网段
@@ -893,7 +1095,14 @@ generate_new_config() {
         return 1
     fi
 
-    print_info "选择的网段: $network"
+    # 处理多选IP的显示
+    local network_display="$network"
+    if [[ "$network" == MULTI_IPS:* ]]; then
+        local count=$(echo "$network" | cut -d':' -f2)
+        network_display="多选IP ($count个)"
+    fi
+
+    print_info "选择的网段: $network_display"
     print_info "SOCKS5端口: $port"
 
     if [ -n "$unified_username" ]; then
@@ -1031,7 +1240,7 @@ show_usage() {
     echo "  - 如果指定了用户名和密码，所有代理将使用统一的认证信息"
     echo "  - 如果未指定，每个代理将生成独立的随机用户名密码"
     echo "  - 如果未指定网段(-n)，将进入交互式选择模式"
-    echo "  - 选择单个IP时，将仅对该IP生成代理"
+    echo "  - 选择本机IP时，支持多选多个IP地址"
     echo "  - 选择网段时，将对整个网段生成代理"
     echo "  - 配置文件保存在 $CONFIG_DIR/ 目录下，每个配置有唯一ID"
 }
@@ -1224,7 +1433,14 @@ main() {
         fi
     fi
 
-    print_info "选择的网段: $network"
+    # 处理多选IP的显示
+    local network_display="$network"
+    if [[ "$network" == MULTI_IPS:* ]]; then
+        local count=$(echo "$network" | cut -d':' -f2)
+        network_display="多选IP ($count个)"
+    fi
+
+    print_info "选择的网段: $network_display"
     print_info "SOCKS5端口: $port"
 
     if [ -n "$unified_username" ]; then
