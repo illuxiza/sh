@@ -70,8 +70,6 @@ declare -A stype
 declare -A sscore
 declare -A sfactor
 declare -A smedia
-declare -A smail
-declare -A smailstatus
 declare -A stail
 declare mode_no=0
 declare mode_yes=0
@@ -129,13 +127,11 @@ swarn[60]="ERROR: IPv6 is not available!"
 sinfo[database]="Checking IP database "
 sinfo[media]="Checking stream media "
 sinfo[ai]="Checking AI provider "
-sinfo[mail]="Connecting Email server "
 sinfo[dnsbl]="Checking Blacklist database "
 sinfo[ldatabase]=21
 sinfo[lmedia]=22
 sinfo[lai]=21
-sinfo[lmail]=24
-sinfo[ldnsbl]=28
+sinfo[ldnsbl]=24
 shead[title]="IP QUALITY CHECK REPORT: "
 shead[title_lite]="IP QUALITY CHECK REPORT(LITE): "
 shead[ver]="Version: $script_version"
@@ -222,18 +218,6 @@ smedia[meida]="Service: "
 smedia[status]="Status:  "
 smedia[region]="Region:  "
 smedia[type]="Type:    "
-smail[title]="6. Email service availability and blacklist detection"
-smail[port]="Local Port 25 Outbound: "
-smail[yes]="${Font_Green}Available$Font_Suffix"
-smail[no]="${Font_Red}Blocked$Font_Suffix"
-smail[occupied]="${Font_Yellow}Occupied$Font_Suffix"
-smail[blocked]="${Font_Red}Remote Port 25 unreachable​$Font_Suffix"
-smail[provider]="Conn: "
-smail[dnsbl]="DNSBL database: "
-smail[available]="$Font_Suffix${Font_Cyan}Active $Font_B"
-smail[clean]="$Font_Suffix${Font_Green}Clean $Font_B"
-smail[marked]="$Font_Suffix${Font_Yellow}Marked $Font_B"
-smail[blacklisted]="$Font_Suffix${Font_Red}Blacklisted $Font_B"
 ;;
 "cn")swarn[1]="错误：不支持的参数！"
 swarn[2]="错误：IP地址格式错误！"
@@ -249,13 +233,11 @@ swarn[60]="错误：IPV6不可用！"
 sinfo[database]="正在检测IP数据库 "
 sinfo[media]="正在检测流媒体服务商 "
 sinfo[ai]="正在检测AI服务商 "
-sinfo[mail]="正在连接邮件服务商 "
 sinfo[dnsbl]="正在检测黑名单数据库 "
 sinfo[ldatabase]=17
 sinfo[lmedia]=21
 sinfo[lai]=17
-sinfo[lmail]=19
-sinfo[ldnsbl]=21
+sinfo[ldnsbl]=19
 shead[title]="IP质量体检报告："
 shead[title_lite]="IP质量体检报告(Lite)："
 shead[ver]="脚本版本：$script_version"
@@ -342,18 +324,6 @@ smedia[meida]="服务商： "
 smedia[status]="状态：   "
 smedia[region]="地区：   "
 smedia[type]="方式：   "
-smail[title]="六、邮局连通性及黑名单检测"
-smail[port]="本地25端口出站："
-smail[yes]="$Font_Green可用$Font_Suffix"
-smail[no]="$Font_Red阻断$Font_Suffix"
-smail[occupied]="$Font_Yellow占用$Font_Suffix"
-smail[blocked]="$Font_Red远端25端口不可达​$Font_Suffix"
-smail[provider]="通信："
-smail[dnsbl]="IP地址黑名单数据库："
-smail[available]="$Font_Suffix$Font_Cyan有效 $Font_B"
-smail[clean]="$Font_Suffix$Font_Green正常 $Font_B"
-smail[marked]="$Font_Suffix$Font_Yellow已标记 $Font_B"
-smail[blacklisted]="$Font_Suffix$Font_Red黑名单 $Font_B"
 ;;
 *)echo -ne "ERROR: Language not supported!"
 esac
@@ -1568,119 +1538,6 @@ chatgpt[uregion]="${smedia[nodata]}"
 chatgpt[utype]="${smedia[nodata]}"
 fi
 }
-get_sorted_mx_records(){
-local domain=$1
-dig +short MX $domain|sort -n|head -1|awk '{print $2}'
-}
-check_email_service(){
-local service=$1
-local port=25
-local expected_response="220"
-local domain=""
-local host=""
-local response=""
-local success="false"
-case $service in
-"Gmail")domain="gmail.com";;
-"Outlook")domain="outlook.com";;
-"Yahoo")domain="yahoo.com";;
-"Apple")domain="me.com";;
-"MailRU")domain="mail.ru";;
-"AOL")domain="aol.com";;
-"GMX")domain="gmx.com";;
-"MailCOM")domain="mail.com";;
-"163")domain="163.com";;
-"Sohu")domain="sohu.com";;
-"Sina")domain="sina.com";;
-"QQ")domain="qq.com";;
-*)return
-esac
-if [[ -z $host ]];then
-local mx_hosts=($(get_sorted_mx_records $domain))
-for host in "${mx_hosts[@]}";do
-response=$(timeout 5 bash -c "echo -e 'QUIT\r\n' | nc -s $IP -w4 $host $port 2>&1")
-smail_response[$service]=$response
-if [[ $response == *"$expected_response"* ]];then
-success="true"
-smail[$service]="$Font_Black+$Font_Suffix$Back_Green$Font_White$Font_B$service$Font_Suffix"
-smailstatus[$service]="true"
-smail[remote]=1
-break
-fi
-done
-else
-response=$(timeout 5 bash -c "echo -e 'QUIT\r\n' | nc -s $IP -w4 $host $port 2>&1")
-if [[ $response == *"$expected_response"* ]];then
-success="true"
-smail[$service]="$Font_Black+$Font_Suffix$Back_Green$Font_White$Font_B$service$Font_Suffix"
-smailstatus[$service]="true"
-smail[remote]=1
-fi
-fi
-if [[ $success == "false" ]];then
-smail[$service]="$Font_Black-$Font_Suffix$Back_Red$Font_White$Font_B$service$Font_Suffix"
-smailstatus[$service]="false"
-fi
-}
-check_mail(){
-ss -tano|grep -q ":25\b"&&smail[local]=2||smail[local]=0
-if [[ smail[local] -ne 2 && -z $usePROXY ]];then
-local response=$(timeout 10 bash -c "echo -e 'QUIT\r\n' | nc -s $IP -p25 -w9 smtp.mailgun.org 25 2>&1")
-[[ $response == *"220"* ]]&&smail[local]=1
-fi
-[[ -n $usePROXY ]]&&smail[local]=0
-smail[remote]=0
-services=("Gmail" "Outlook" "Yahoo" "Apple" "QQ" "MailRU" "AOL" "GMX" "MailCOM" "163" "Sohu" "Sina")
-for service in "${services[@]}";do
-local temp_info="$Font_Cyan$Font_B${sinfo[mail]}$Font_I$service$Font_Suffix "
-((ibar_step+=3))
-show_progress_bar "$temp_info" $((40-1-${#service}-${sinfo[lmail]}))&
-bar_pid="$!"&&disown "$bar_pid"
-check_email_service $service
-kill_progress_bar
-done
-}
-check_dnsbl_parallel(){
-ip_to_check=$1
-parallel_jobs=$2
-smail[t]=0
-smail[c]=0
-smail[m]=0
-smail[b]=0
-reversed_ip=$(echo "$ip_to_check"|awk -F. '{print $4"."$3"."$2"."$1}')
-local total=0
-local clean=0
-local blacklisted=0
-local other=0
-curl $CurlARG -sL "${rawgithub}main/ref/dnsbl.list"|sort -u|xargs -P "$parallel_jobs" -I {} bash -c "result=\$(dig +short \"$reversed_ip.{}\" A); if [[ -z \"\$result\" ]]; then echo 'Clean'; elif [[ \"\$result\" == '127.0.0.2' ]]; then echo 'Blacklisted'; else echo 'Other'; fi"|{
-while IFS= read -r line;do
-((total++))
-case "$line" in
-"Clean")((clean++));;
-"Blacklisted")((blacklisted++));;
-*)((other++))
-esac
-done
-smail[t]="$total"
-smail[c]="$clean"
-smail[m]="$other"
-smail[b]="$blacklisted"
-echo "${smail[t]} ${smail[c]} ${smail[m]} ${smail[b]}"
-}
-}
-check_dnsbl(){
-local temp_info="$Font_Cyan$Font_B${sinfo[dnsbl]} $Font_Suffix"
-((ibar_step=95))
-show_progress_bar "$temp_info" $((40-1-${sinfo[ldnsbl]}))&
-bar_pid="$!"&&disown "$bar_pid"
-trap "kill_progress_bar" RETURN
-local num_array=($(check_dnsbl_parallel "$IP" 50))
-smail[t]=${num_array[0]:-0}
-smail[c]=${num_array[1]:-0}
-smail[m]=${num_array[2]:-0}
-smail[b]=${num_array[3]:-0}
-smail[sdnsbl]="$Font_Cyan${smail[dnsbl]}  ${smail[available]}${smail[t]}   ${smail[clean]}${smail[c]}   ${smail[marked]}${smail[m]}   ${smail[blacklisted]}${smail[b]}$Font_Suffix"
-}
 show_head(){
 echo -ne "\r$(printf '%72s'|tr ' ' '#')\n"
 if [[ $mode_lite -eq 0 ]];then
@@ -2005,26 +1862,6 @@ echo -ne "\r$Font_Cyan${smedia[status]}${tiktok[ustatus]}${netflix[ustatus]}${yo
 echo -ne "\r$Font_Cyan${smedia[region]}$Font_Green${tiktok[uregion]}${netflix[uregion]}${youtube[uregion]}${amazon[uregion]}${instagram[uregion]}${chatgpt[uregion]}$Font_Suffix\n"
 echo -ne "\r$Font_Cyan${smedia[type]}${tiktok[utype]}${netflix[utype]}${youtube[utype]}${amazon[utype]}${instagram[utype]}${chatgpt[utype]}$Font_Suffix\n"
 }
-show_mail(){
-echo -ne "\r${smail[title]}\n"
-if [ ${smail[local]} -eq 1 ];then
-echo -ne "\r$Font_Cyan${smail[port]}$Font_Suffix${smail[yes]}\n"
-elif [ ${smail[local]} -eq 2 ];then
-echo -ne "\r$Font_Cyan${smail[port]}$Font_Suffix${smail[occupied]}\n"
-else
-echo -ne "\r$Font_Cyan${smail[port]}$Font_Suffix${smail[no]}\n"
-fi
-if [ ${smail[remote]} -eq 1 ];then
-echo -ne "\r$Font_Cyan${smail[provider]}$Font_Suffix"
-for service in "${services[@]}";do
-echo -ne "${smail[$service]}"
-done
-echo ""
-else
-echo -ne "\r$Font_Cyan${smail[provider]}${smail[blocked]}$Font_Suffix\n"
-fi
-[[ $1 -eq 4 ]]&&echo -ne "\r${smail[sdnsbl]}\n"
-}
 show_tail(){
 echo -ne "\r$(printf '%72s'|tr ' ' '=')\n"
 echo -e ""
@@ -2134,7 +1971,6 @@ local type_updates=""
 local score_updates=""
 local factor_updates=""
 local media_updates=""
-local mail_updates=""
 if [ $fullIP -eq 1 ];then
 head_updates+=".Head |= map(. + { IP: \"${IP:-null}\" }) | "
 else
@@ -2294,31 +2130,7 @@ media_updates+=".Media |= map(. * { Youtube: { Type: \"$(clean_ansi "${youtube[u
 media_updates+=".Media |= map(. * { AmazonPrimeVideo: { Type: \"$(clean_ansi "${amazon[utype]:-null}")\" } }) | "
 media_updates+=".Media |= map(. * { Instagram: { Type: \"$(clean_ansi "${instagram[utype]:-null}")\" } }) | "
 media_updates+=".Media |= map(. * { ChatGPT: { Type: \"$(clean_ansi "${chatgpt[utype]:-null}")\" } }) | "
-if [[ ${smail[local]} -eq 1 ]];then
-mail_updates+=".Mail |= map(. + { Port25: true }) | "
-for service in "${services[@]}";do
-if [[ ${smailstatus[$service]} == "true" ]];then
-mail_updates+=".Mail |= map(. + { \"$service\": true }) | "
-else
-mail_updates+=".Mail |= map(. + { \"$service\": false }) | "
-fi
-done
-elif [[ ${smail[local]} -eq 2 ]];then
-mail_updates+=".Mail |= map(. + { Port25: null }) | "
-for service in "${services[@]}";do
-mail_updates+=".Mail |= map(. + { \"$service\": null }) | "
-done
-else
-mail_updates+=".Mail |= map(. + { Port25: false }) | "
-for service in "${services[@]}";do
-mail_updates+=".Mail |= map(. + { \"$service\": false }) | "
-done
-fi
-mail_updates+=".Mail |= map(. * { DNSBlacklist: { Total: ${smail[t]:-null} } }) | "
-mail_updates+=".Mail |= map(. * { DNSBlacklist: { Clean: ${smail[c]:-null} } }) | "
-mail_updates+=".Mail |= map(. * { DNSBlacklist: { Marked: ${smail[m]:-null} } }) | "
-mail_updates+=".Mail |= map(. * { DNSBlacklist: { Blacklisted: ${smail[b]:-null} } }) | "
-ipjson=$(echo "$ipjson"|jq "$head_updates$basic_updates$type_updates$score_updates$factor_updates$media_updates$mail_updates.")
+ipjson=$(echo "$ipjson"|jq "$head_updates$basic_updates$type_updates$score_updates$factor_updates$media_updates.")
 }
 check_IP(){
 IP=$1
@@ -2329,8 +2141,7 @@ ipjson='{
       "Type": [{}],
       "Score": [{}],
       "Factor": [{}],
-      "Media": [{}],
-      "Mail": [{}]
+      "Media": [{}]
     }'
 [[ $2 -eq 4 ]]&&hide_ipv4 $IP
 [[ $2 -eq 6 ]]&&hide_ipv6 $IP
@@ -2351,8 +2162,6 @@ MediaUnlockTest_YouTube_Premium $2
 MediaUnlockTest_PrimeVideo_Region $2
 MediaUnlockTest_Instagram $2
 OpenAITest $2
-check_mail
-[[ $2 -eq 4 ]]&&check_dnsbl "$IP" 50
 echo -ne "$Font_LineClear" 1>&2
 if [[ $mode_lite -eq 0 ]];then
 local ip_report=$(show_head
@@ -2361,7 +2170,6 @@ show_type
 show_score
 show_factor
 show_media
-show_mail $2
 show_tail)
 else
 local ip_report=$(show_head
@@ -2370,7 +2178,6 @@ show_type_lite
 show_score
 show_factor_lite
 show_media
-show_mail $2
 show_tail)
 fi
 [[ mode_json -eq 1 || mode_output -eq 1 ]]&&save_json
