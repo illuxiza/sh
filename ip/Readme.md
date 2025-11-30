@@ -8,7 +8,7 @@ IP质量检测脚本 - 基于开源项目修改的个人定制版本
 
 直接使用: 
 ```
-bash <(curl -fsSL https://github.com/illuxiza/sh/raw/main/iq/ip-quality.sh)
+bash <(curl -fsSL https://github.com/illuxiza/sh/raw/main/ip/ip-quality.sh)
 ```
 
 ## 主要修改内容
