@@ -703,14 +703,14 @@ get_network_range() {
             host_count=254
         fi
 
-        # 对于 /24，只生成 1-254
+        # 对于 /24，只生成 2-254
         if [ "$cidr" -eq 24 ]; then
-            for i in $(seq 1 254); do
+            for i in $(seq 2 254); do
                 echo "${base_ip}.$i"
             done
         else
             # 对于大于 /24 的网段，生成计算出的主机数量
-            local start_ip=1
+            local start_ip=2
             local end_ip=$((host_count))
             for i in $(seq $start_ip $end_ip); do
                 echo "${base_ip}.$i"
