@@ -441,45 +441,44 @@ select_config_to_delete() {
     read -p "按回车键继续..." -r
 }
 
-# 将代理注册为 systemd 服务（固化）
-setup_systemd_service() {
-    local config_id=$1
-
+# 将所有配置注册为统一的全局 systemd 服务
+setup_global_systemd_service() {
     # 检查是否为 root
     if [ "$EUID" -ne 0 ]; then
         print_error "必须以 root 权限运行此操作以配置 systemd 服务"
-        print_info "尝试: sudo $0 -f $config_id"
+        print_info "尝试: sudo $0 -f"
         return 1
     fi
-
-    if ! jq -e ".configs[] | select(.id == $config_id)" "$META_FILE" >/dev/null 2>&1; then
-        print_error "配置ID $config_id 不存在"
-        return 1
-    fi
-
-    local config_info=$(jq -r ".configs[] | select(.id == $config_id)" "$META_FILE")
-    local config_dir=$(echo "$config_info" | jq -r '.config_dir')
-    local config_file="$config_dir/gost-config.json"
 
     # 确保 gost 二进制文件存在
     local gost_path=$(command -v gost)
     if [ -z "$gost_path" ]; then
-        print_error "未找到 gost 命令，请确保已正确安装"
-        return 1
+        # 尝试一些常见的路径
+        if [ -f "/usr/local/bin/gost" ]; then
+            gost_path="/usr/local/bin/gost"
+        elif [ -f "/usr/bin/gost" ]; then
+            gost_path="/usr/bin/gost"
+        else
+            print_error "未找到 gost 命令，请确保已正确安装"
+            return 1
+        fi
     fi
 
-    # 1. 创建服务模板文件 (如果不存在)
-    local service_template="/etc/systemd/system/gost@.service"
-    if [ ! -f "$service_template" ]; then
-        print_info "配置 systemd 服务模板..."
-        cat > "$service_template" << EOF
+    print_info "正在配置全局 gost.service..."
+
+    # 1. 创建统一的服务文件
+    local service_file="/etc/systemd/system/gost.service"
+    
+    # 这里的 ExecStart 使用 bash 动态拼接待所有配置文件的 -C 参数
+    cat > "$service_file" << EOF
 [Unit]
-Description=Gost Proxy Service (Instance %i)
+Description=Gost Unified Proxy Service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$gost_path -C /etc/gost/config_%i/gost-config.json
+# 动态扫描所有配置目录下的 gost-config.json
+ExecStart=/bin/bash -c '$gost_path \$(find $CONFIG_DIR/config_* -name "gost-config.json" -exec echo -n "-C {} " \\\\;)'
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -487,58 +486,33 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        print_success "服务模板已创建: $service_template"
-    fi
 
-    # 2. 停掉目前可能正在运行的手动进程
-    print_info "正在停止可能存在的后台进程..."
-    stop_proxy_by_id "$config_id" >/dev/null 2>&1 || true
+    # 2. 停掉目前所有手动启动的 nohup 进程，防止端口冲突
+    print_info "正在停止所有手动启动的后台进程以防止冲突..."
+    pkill -f "gost.*gost-config.json" >/dev/null 2>&1 || true
+    sleep 1
 
-    # 3. 启用并开始服务
-    print_info "正在启用并启动 gost@$config_id 服务..."
-    systemctl enable "gost@$config_id" --now
+    # 3. 重新加载并启动
+    systemctl daemon-reload
+    systemctl enable gost --now
 
-    if systemctl is-active --quiet "gost@$config_id"; then
-        print_success "配置 ID $config_id 已成功固化为系统服务，并已设置为开机自启"
-        # 更新元数据状态
-        jq --argjson id "$config_id" '.configs |= map(if .id == $id then .status = "service" else . end)' "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
+    if systemctl is-active --quiet gost; then
+        print_success "全局 gost 服务已启动并设置为开机自启"
+        print_info "使用 'systemctl status gost' 查看状态"
+        print_info "所有位于 $CONFIG_DIR/config_* 的配置都已被加载"
+        
+        # 更新元数据中所有运行过的配置状态
+        jq '.configs |= map(.status = "running")' "$META_FILE" > "${META_FILE}.tmp" && mv "${META_FILE}.tmp" "$META_FILE"
     else
-        print_error "服务启动失败，请检查: journalctl -u gost@$config_id"
+        print_error "服务启动失败，请检查: journalctl -u gost -n 50"
         return 1
     fi
 
     return 0
 }
 
-# 选择配置固化菜单
-select_config_to_fortify() {
-    if ! list_configs; then
-        return 1
-    fi
-
-    echo ""
-    print_info "请输入要固化为服务的配置ID (由 systemd 管理)，或输入 'q' 退出:"
-    while true; do
-        read -p "配置ID: " input
-
-        if [ "$input" = "q" ] || [ "$input" = "Q" ]; then
-            print_info "退出固化菜单"
-            return 0
-        fi
-
-        if echo "$input" | grep -qE '^[0-9]+$'; then
-            if setup_systemd_service "$input"; then
-                break
-            fi
-        else
-            print_warning "请输入有效的数字ID"
-        fi
-    done
-
-    echo ""
-    read -p "按回车键继续..." -r
-}
+# 选择配置固化菜单 (已废弃，改为全局固化)
+# select_config_to_fortify() { ... }
 
 # 启动指定ID的代理
 start_proxy_by_id() {
@@ -1304,7 +1278,7 @@ show_main_menu() {
     echo "3) 关闭已有配置的代理"
     echo "4) 查看所有配置"
     echo "5) 删除指定配置"
-    echo "6) 将配置固化为系统服务 (开机自启)"
+    echo "6) 部署/更新全局管理服务 (开机自启所有配置)"
     echo "7) 显示网络接口信息"
     echo "8) 退出"
     echo ""
@@ -1323,7 +1297,7 @@ show_usage() {
     echo "  -i, --interface         显示可用的网络接口和路由网段"
     echo "  -s, --start-id ID       直接启动指定ID的代理"
     echo "  -k, --stop-id ID        关闭指定ID的代理"
-    echo "  -f, --fortify-id ID     将指定ID固化为系统服务"
+    echo "  -f, --fortify           配置/重启全局管理服务"
     echo "  -d, --delete-id ID      删除指定ID的配置"
     echo "  -l, --list              列出所有配置"
     echo ""
@@ -1395,9 +1369,9 @@ main() {
                 stop_id="$2"
                 shift 2
                 ;;
-            -f|--fortify-id)
-                fortify_id="$2"
-                shift 2
+            -f|--fortify)
+                fortify_id="all"
+                shift
                 ;;
             -d|--delete-id)
                 delete_id="$2"
@@ -1443,7 +1417,7 @@ main() {
     fi
 
     if [ -n "$fortify_id" ]; then
-        setup_systemd_service "$fortify_id"
+        setup_global_systemd_service
         exit $?
     fi
 
@@ -1479,7 +1453,9 @@ main() {
                     select_config_to_delete
                     ;;
                 6)
-                    select_config_to_fortify
+                    setup_global_systemd_service
+                    echo ""
+                    read -p "按回车键继续..." -r
                     ;;
                 7)
                     echo ""
