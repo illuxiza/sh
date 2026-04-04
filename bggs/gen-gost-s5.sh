@@ -563,7 +563,15 @@ start_proxy_by_id() {
         return 1
     fi
 
-    # 检查是否已经在运行
+    # 如果是 root，优先尝试使用 systemd 服务模式启动
+    if [ "$EUID" -eq 0 ] && [ -f "/etc/systemd/system/gost@.service" ]; then
+        print_info "正在以 systemd 服务模式启动 ID $config_id..."
+        # 确保旧的 nohup 进程已停 (由 setup_systemd_service 或 systemctl 管理)
+        setup_systemd_service "$config_id"
+        return $?
+    fi
+
+    # 检查是否已经在运行 (手动模式检查)
     if is_config_running "$config_id"; then
         print_warning "配置ID $config_id 的代理已经在运行中"
         local config_info=$(jq -r ".configs[] | select(.id == $config_id)" "$META_FILE")
@@ -1300,11 +1308,18 @@ generate_new_config() {
     fi
 
     echo ""
-    print_info "启动代理命令:"
-    print_info "./generate-socks5.sh -s $config_id"
-    print_info "或者直接运行: gost -C $config_dir/gost-config.json"
-    echo ""
+    print_info "配置生成完成！您可以立即将其启用为开机自启的系统服务。"
+    read -p "是否立即启用系统服务模式? (Y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        setup_systemd_service "$config_id"
+    else
+        print_info "手动启动命令:"
+        print_info "./generate-socks5.sh -s $config_id"
+        print_info "若需以后再固化，请运行: ./generate-socks5.sh -f $config_id"
+    fi
 
+    echo ""
     read -p "按回车键继续..." -r
 }
 
