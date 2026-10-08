@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2026-03-13"
+script_version="v2026-10-08"
 check_bash(){
 current_bash_version=$(bash --version|head -n 1|awk -F ' ' '{for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+/) {print $i; exit}}'|cut -d . -f 1)
 if [ "$current_bash_version" = "0" ]||[ "$current_bash_version" = "1" ]||[ "$current_bash_version" = "2" ]||[ "$current_bash_version" = "3" ];then
@@ -262,7 +262,8 @@ shead[title_lite]="IP质量体检报告(Lite)："
 shead[ver]="脚本版本：$script_version"
 shead[bash]="bash "
 shead[git]="https://github.com/xykt/IPQuality"
-shead[time]=$(TZ="Asia/Shanghai" date +"报告时间：%Y-%m-%d %H:%M:%S CST")
+shead[time_raw]=$(TZ="Asia/Shanghai" date +"%Y-%m-%d %H:%M:%S CST")
+shead[time]="报告时间：${shead[time_raw]}"
 shead[ltitle]=16
 shead[ltitle_lite]=22
 shead[ptime]=$(printf '%8s' '')
@@ -509,10 +510,12 @@ fi
 }
 is_valid_ipv4(){
 local ip=$1
+local octet
+local -a octets
 if [[ $ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]];then
 IFS='.' read -r -a octets <<<"$ip"
 for octet in "${octets[@]}";do
-if ((octet<0||octet>255));then
+if ((10#$octet>255));then
 IPV4work=0
 return 1
 fi
@@ -537,10 +540,9 @@ return 1
 get_ipv4(){
 local response
 IPV4=""
-local API_NET=("myip.check.place" "ip.sb" "ping0.cc" "icanhazip.com" "api64.ipify.org" "ifconfig.co" "ident.me")
+local API_NET=("ipinfo.io/ip" "myip.check.place" "ip.sb" "ping0.cc" "icanhazip.com" "api64.ipify.org" "ifconfig.co" "ident.me")
 for p in "${API_NET[@]}";do
-response=$(curl $CurlARG -s4 --max-time 2 "$p")
-if [[ $? -eq 0 && ! $response =~ error && -n $response ]];then
+if response=$(curl $CurlARG -fs4 --max-time 2 "$p")&&is_valid_ipv4 "$response";then
 IPV4="$response"
 break
 fi
@@ -549,7 +551,7 @@ done
 hide_ipv4(){
 if [[ -n $1 ]];then
 IFS='.' read -r -a ip_parts <<<"$1"
-IPhide="${ip_parts[0]}.${ip_parts[1]}.*.*"
+IPhide="${ip_parts[0]}.${ip_parts[1]}.${ip_parts[2]}.*"
 else
 IPhide=""
 fi
@@ -579,8 +581,7 @@ local response
 IPV6=""
 local API_NET=("myip.check.place" "ip.sb" "ping0.cc" "icanhazip.com" "api64.ipify.org" "ifconfig.co" "ident.me")
 for p in "${API_NET[@]}";do
-response=$(curl $CurlARG -s6k --max-time 2 "$p")
-if [[ $? -eq 0 && ! $response =~ error && -n $response ]];then
+if response=$(curl $CurlARG -fs6k --max-time 2 "$p")&&is_valid_ipv6 "$response";then
 IPV6="$response"
 break
 fi
@@ -903,12 +904,13 @@ show_progress_bar "$temp_info" $((40-6-${sinfo[ldatabase]}))&
 bar_pid="$!"&&disown "$bar_pid"
 trap "kill_progress_bar" RETURN
 ipapi=()
-if [[ $IP == *:* ]];then
-local RESPONSE=$(curl -Ls -m 10 "https://api.ipapi.is/?q=$IP")
-else
-local RESPONSE=$(curl $CurlARG -sL -m 10 "https://api.ipapi.is/?q=$IP")
+local RESPONSE=$(curl $CurlARG -fsL -$1 -m 10 "https://ipinfo.check.place/$IP?db=ipapi")
+local response_filter='type == "object" and (.asn | type == "object") and (.company | type == "object") and (.location | type == "object")'
+if ! jq -e "$response_filter" <<<"$RESPONSE" >/dev/null 2>&1;then
+# The direct API also supports querying IPv6 addresses over IPv4.
+RESPONSE=$(curl $CurlARG -fsL -m 10 "https://api.ipapi.is/?q=$IP")
 fi
-echo "$RESPONSE"|jq . >/dev/null 2>&1||RESPONSE=""
+jq -e "$response_filter" <<<"$RESPONSE" >/dev/null 2>&1||return 1
 ipapi[usetype]=$(echo "$RESPONSE"|jq -r '.asn.type')
 ipapi[comtype]=$(echo "$RESPONSE"|jq -r '.company.type')
 shopt -s nocasematch
@@ -942,11 +944,12 @@ case ${ipapi[comtype]} in
 ;;
 *)ipapi[scomtype]="${stype[other]}"
 esac
-[[ -z $RESPONSE ]]&&return 1
 ipapi[scoretext]=$(echo "$RESPONSE"|jq -r '.company.abuser_score')
 ipapi[scorenum]=$(echo "${ipapi[scoretext]}"|awk '{print $1}')
 ipapi[risktext]=$(echo "${ipapi[scoretext]}"|awk -F'[()]' '{print $2}')
-ipapi[score]=$(awk "BEGIN {printf \"%.2f%%\", ${ipapi[scorenum]} * 100}")
+if [[ ${ipapi[scorenum]} =~ ^[0-9]+([.][0-9]+)?$ ]];then
+ipapi[score]=$(awk -v score="${ipapi[scorenum]}" 'BEGIN {printf "%.2f%%", score * 100}')
+fi
 case ${ipapi[risktext]} in
 "Very Low")ipapi[risk]="${sscore[verylow]}"
 ;;
@@ -1117,22 +1120,16 @@ show_progress_bar "$temp_info" $((40-6-${sinfo[ldatabase]}))&
 bar_pid="$!"&&disown "$bar_pid"
 trap "kill_progress_bar" RETURN
 dbip=()
-if [[ $IP == *:* ]];then
-local RESPONSE=$(curl -sL -m 10 "https://db-ip.com/$IP")
-else
-local RESPONSE=$(curl $CurlARG -sL -m 10 "https://db-ip.com/$IP")
-fi
-mapfile -t results < <(echo "$RESPONSE"|awk '/<th class='\''text-center'\''>Crawler/ {flag=1; next}
-             flag && /<span class="sr-only">/ {
-                 if ($0 ~ /Yes/) print "true";
-                 else if ($0 ~ /No/) print "false";
-             }
-             /<\/tr>/ && flag {flag=0}')
-dbip[robot]="${results[0]}"
-dbip[proxy]="${results[1]}"
-dbip[abuser]="${results[2]}"
-dbip[risktext]=$(echo "$RESPONSE"|sed -n 's/.*Estimated threat level for this IP address is[[:space:]]*<span[^>]*>\([^<]*\)<.*/\1/p')
-dbip[countrycode]=$(echo "$RESPONSE"|sed -n '/<code class="language-json">/,/<\/code>/p'|sed -n 's/.*"countryCode"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+local RESPONSE=$(curl $CurlARG -fsL -$1 -m 10 --user-agent "$UA_Browser" "https://db-ip.com/api/core/")
+local api_key=$(echo "$RESPONSE"|sed -n 's/.*data-api-key="\([^"]*\)".*/\1/p'|head -n 1)
+[[ $api_key =~ ^[a-zA-Z0-9]+$ ]]||return 1
+RESPONSE=$(curl $CurlARG -fsL -$1 -m 10 --user-agent "$UA_Browser" -H 'content-type: text/plain;charset=UTF-8' -H 'origin: https://db-ip.com' -H 'referer: https://db-ip.com/' --data-raw '[["11.49","EUR"],["139.90","EUR"],["699.90","EUR"]]' "https://api.db-ip.com/v2/$api_key/self?convertCurrencies")
+# Public keys only allow /self; never report a different request's exit IP.
+jq -e --arg ip "$IP" 'type == "object" and .ipAddress == $ip and .error == null' <<<"$RESPONSE" >/dev/null 2>&1||return 1
+dbip[robot]=$(echo "$RESPONSE"|jq -r '.isCrawler')
+dbip[proxy]=$(echo "$RESPONSE"|jq -r '.isProxy')
+dbip[risktext]=$(echo "$RESPONSE"|jq -r '.threatLevel')
+dbip[countrycode]=$(echo "$RESPONSE"|jq -r '.countryCode')
 shopt -s nocasematch
 case ${dbip[risktext]} in
 "low")dbip[risk]="${sscore[low]}"
@@ -1258,7 +1255,7 @@ else
 echo 1
 fi
 else
-echo 0
+echo 1
 fi
 }
 function Check_DNS_1(){
@@ -1287,7 +1284,7 @@ function Check_DNS_3(){
 local resultdnstext=$(dig "test$RANDOM$RANDOM.$1"|grep "ANSWER:")
 local resultdnstext=${resultdnstext#*"ANSWER: "}
 local resultdnstext=${resultdnstext%", AUTHORITY:"*}
-if [ "$resultdnstext" == "0" ];then
+if [ "$resultdnstext" == "0" ]||[ -z "$resultdnstext" ];then
 echo 1
 else
 echo 0
@@ -1315,7 +1312,7 @@ local result1=$(Check_DNS_1 $checkunlockurl)
 local result3=$(Check_DNS_3 $checkunlockurl)
 local resultunlocktype=$(Get_Unlock_Type $result1 $result3)
 local Ftmpresult=$(curl $CurlARG -$1 --user-agent "$UA_Browser" -sL -m 10 "https://www.tiktok.com/")
-[[ $Ftmpresult == *"Please wait..."* ]]&&Ftmpresult=$(curl $useNIC $usePROXY $xForward --user-agent "$UA_Browser" -sL -m 10 "https://www.tiktok.com/explore")
+[[ $Ftmpresult == *"Please wait..."* ]]&&Ftmpresult=$(curl $useNIC $usePROXY --user-agent "$UA_Browser" -sL -m 10 "https://www.tiktok.com/explore")
 if [[ $Ftmpresult == "curl"* ]];then
 tiktok[ustatus]="${smedia[no]}"
 tiktok[uregion]="${smedia[nodata]}"
@@ -1333,7 +1330,7 @@ tiktok[utype]="$resultunlocktype"
 return
 fi
 local STmpresult=$(curl $CurlARG -$1 --user-agent "$UA_Browser" -sL -m 10 -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9" -H "Accept-Encoding: gzip" -H "Accept-Language: en" "https://www.tiktok.com"|gunzip 2>/dev/null)
-[[ $Ftmpresult == *"Please wait..."* ]]&&STmpresult=$(curl $useNIC $usePROXY $xForward --user-agent "$UA_Browser" -sL -m 10 -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9" -H "Accept-Encoding: gzip" -H "Accept-Language: en" "https://www.tiktok.com/explore"|gunzip 2>/dev/null)
+[[ $Ftmpresult == *"Please wait..."* ]]&&STmpresult=$(curl $useNIC $usePROXY --user-agent "$UA_Browser" -sL -m 10 -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9" -H "Accept-Encoding: gzip" -H "Accept-Language: en" "https://www.tiktok.com/explore"|gunzip 2>/dev/null)
 local SRegion=$(echo $STmpresult|grep '"region":'|sed 's/.*"region"//'|cut -f2 -d'"')
 if [ -n "$SRegion" ];then
 tiktok[ustatus]="${smedia[idc]}"
@@ -1458,7 +1455,7 @@ amazon[uregion]="${smedia[nodata]}"
 amazon[utype]="${smedia[nodata]}"
 return
 fi
-local result=$(echo $tmpresult|grep '"currentTerritory":'|sed 's/.*currentTerritory//'|cut -f3 -d'"'|head -n 1)
+local result=$(printf '%s' "$tmpresult"|grep -o -E '"currentTerritory":[[:space:]]*"[A-Z]{2}"'|head -n 1|cut -d'"' -f4)
 if [ -n "$result" ];then
 amazon[ustatus]="${smedia[yes]}"
 amazon[uregion]="  [$result]   "
@@ -1489,8 +1486,8 @@ instagram[uregion]="${smedia[nodata]}"
 instagram[utype]="${smedia[nodata]}"
 return
 fi
-local IG_COUNTRY=$(echo "$IG_HTML" | grep -o '"country_code":"[^"]*' | head -1 | cut -d'"' -f4)
-local IG_LOCALE=$(echo "$IG_HTML" | grep -o '"locale":"[^"]*' | head -1 | cut -d'"' -f4)
+local IG_COUNTRY=$(echo "$IG_HTML"|grep -o -E '"country_code":[[:space:]]*"[A-Z]{2}"'|head -1|cut -d'"' -f4)
+local IG_LOCALE=$(echo "$IG_HTML"|grep -o -E '"locale":[[:space:]]*"[a-z]{2}_[A-Z]{2}"'|head -1|cut -d'"' -f4)
 if [ -n "$IG_COUNTRY" ] && [ "$IG_COUNTRY" != "CN" ]; then
 instagram[ustatus]="${smedia[yes]}"
 instagram[uregion]="  [$IG_COUNTRY]   "
@@ -1503,7 +1500,8 @@ instagram[utype]="${smedia[nodata]}"
 return
 elif [ -n "$IG_LOCALE" ]; then
 instagram[ustatus]="${smedia[yes]}"
-instagram[uregion]="  [$IG_LOCALE]   "
+# A UI locale is not evidence of the IP's country.
+instagram[uregion]="${smedia[nodata]}"
 instagram[utype]="$resultunlocktype"
 return
 else
@@ -1667,7 +1665,7 @@ local total=0
 local clean=0
 local blacklisted=0
 local other=0
-curl $CurlARG -sL "${rawgithub}main/ref/dnsbl.list"|sort -u|xargs -P "$parallel_jobs" -I {} bash -c "result=\$(dig +short \"$reversed_ip.{}\" A); if [[ -z \"\$result\" ]]; then echo 'Clean'; elif [[ \"\$result\" == '127.0.0.2' ]]; then echo 'Blacklisted'; else echo 'Other'; fi"|{
+curl $CurlARG -sL "${rawgithub}main/ref/dnsbl.list"|sort -u|xargs -P "$parallel_jobs" -I {} bash -c "result=\$(dig +short \"$reversed_ip.{}\" A); if [[ -z \"\$result\" ]]; then echo 'Clean'; elif [[ \"\$result\" =~ ^127\.255\.255\. ]]; then echo 'Clean'; elif [[ \"\$result\" == '127.0.0.2' ]]; then echo 'Blacklisted'; else echo 'Other'; fi"|{
 while IFS= read -r line;do
 ((total++))
 case "$line" in
@@ -2135,6 +2133,7 @@ local type_updates=""
 local score_updates=""
 local factor_updates=""
 local media_updates=""
+local mail_updates=""
 if [ $fullIP -eq 1 ];then
 head_updates+=".Head |= . + { IP: \"${IP:-null}\" } | "
 else
@@ -2207,6 +2206,7 @@ type_updates+=".Type |= . * { Usage: { IP2LOCATION: \"$(clean_ansi "${ip2locatio
 type_updates+=".Type |= . * { Company: { IPinfo: \"$(clean_ansi "${ipinfo[scomtype]:-null}")\" } } | "
 type_updates+=".Type |= . * { Company: { ipregistry: \"$(clean_ansi "${ipregistry[scomtype]:-null}")\" } } | "
 type_updates+=".Type |= . * { Company: { ipapi: \"$(clean_ansi "${ipapi[scomtype]:-null}")\" } } | "
+type_updates+=".Type |= . * { Company: { IP2LOCATION: \"$(clean_ansi "${ip2location[scomtype]:-null}")\" } } | "
 score_updates+=".Score |= . + { IP2LOCATION: \"${ip2location[score]:-null}\" } | "
 score_updates+=".Score |= . + { SCAMALYTICS: \"${scamalytics[score]:-null}\" } | "
 score_updates+=".Score |= . + { ipapi: \"${ipapi[score]:-null}\" } | "
@@ -2342,7 +2342,7 @@ db_ipregistry $2
 db_ipapi $2
 [[ $mode_lite -eq 0 ]]&&db_abuseipdb $2||abuseipdb=()
 [[ $mode_lite -eq 0 ]]&&db_ip2location $2||ip2location=()
-db_dbip
+db_dbip $2
 [[ $mode_lite -eq 0 ]]&&db_ipdata $2||ipdata=()
 [[ $mode_lite -eq 0 ]]&&db_ipqs $2||ipqs=()
 MediaUnlockTest_TikTok $2
